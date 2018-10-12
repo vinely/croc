@@ -55,6 +55,7 @@ func receive(forceSend int, serverAddress string, tcpPorts []string, isLocal boo
 	var resumeFile bool
 	var tcpConnections []comm.Comm
 	dataChan := make(chan []byte, 1024*1024)
+	netConnChan := make(chan bool)
 	blocks := []string{}
 
 	useWebsockets := true
@@ -134,6 +135,22 @@ func receive(forceSend int, serverAddress string, tcpPorts []string, isLocal boo
 			}
 			log.Debugf("%x\n", sessionKey)
 
+			go func() {
+				// connect to TCP to receive file
+				if !useWebsockets {
+					log.Debugf("connecting to server")
+					tcpConnections = make([]comm.Comm, len(tcpPorts))
+					for i, tcpPort := range tcpPorts {
+						tcpConnections[i], err = connectToTCPServer(utils.SHA256(fmt.Sprintf("%d%x", i, sessionKey)), serverAddress+":"+tcpPort)
+						if err != nil {
+							log.Error(err)
+						}
+					}
+					log.Debugf("fully connected")
+				}
+				netConnChan <- true
+			}()
+
 			c.WriteMessage(websocket.BinaryMessage, []byte("ready"))
 		case 3:
 			spin.Stop()
@@ -181,21 +198,6 @@ func receive(forceSend int, serverAddress string, tcpPorts []string, isLocal boo
 					c.WriteMessage(websocket.BinaryMessage, []byte("no"))
 					return nil
 				}
-			}
-
-			// connect to TCP to receive file
-			if !useWebsockets {
-				log.Debugf("connecting to server")
-				tcpConnections = make([]comm.Comm, len(tcpPorts))
-				for i, tcpPort := range tcpPorts {
-					tcpConnections[i], err = connectToTCPServer(utils.SHA256(fmt.Sprintf("%d%x", i, sessionKey)), serverAddress+":"+tcpPort)
-					if err != nil {
-						log.Error(err)
-						return err
-					}
-					defer tcpConnections[i].Close()
-				}
-				log.Debugf("fully connected")
 			}
 
 			// await file
@@ -345,6 +347,11 @@ func receive(forceSend int, serverAddress string, tcpPorts []string, isLocal boo
 			}(finished, dataChan)
 
 			log.Debug("telling sender i'm ready")
+			_ = <-netConnChan
+			for i, _ := range tcpPorts {
+				defer tcpConnections[i].Close()
+			}
+
 			c.WriteMessage(websocket.BinaryMessage, append([]byte("ready"), blocksBytes...))
 
 			startTime := time.Now()
